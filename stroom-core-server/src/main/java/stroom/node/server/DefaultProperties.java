@@ -1116,6 +1116,33 @@ public class DefaultProperties {
                 .description("Choose whether Stroom requires authenticated access")
                 .build());
 
+        // Properties for using the Google OAuth2 API
+        list.add(new GlobalProperty.Builder()
+                .name("stroom.authentication.authUrl")
+                .value("https://accounts.google.com/o/oauth2/v2/auth")
+                .description("The Google OAuth2 auth URL")
+                .build());
+        list.add(new GlobalProperty.Builder()
+                .name("stroom.authentication.tokenUrl")
+                .value("https://accounts.google.com/o/oauth2/token")
+                .description("The Google OAuth2 token URL")
+                .build());
+        list.add(new GlobalProperty.Builder()
+                .name("stroom.authentication.clientId")
+                .value("")
+                .description("The Google OAuth2 client id")
+                .build());
+        list.add(new GlobalProperty.Builder()
+                .name("stroom.authentication.clientSecret")
+                .value("")
+                .description("The Google OAuth2 client secret")
+                .build());
+        list.add(new GlobalProperty.Builder()
+                .name("stroom.authentication.redirectUri")
+                .value("")
+                .description("The Google OAuth2 redirect URI")
+                .build());
+
         // Authorisation
         list.add(new GlobalProperty.Builder()
                 .name("stroom.services.authorisation.name")

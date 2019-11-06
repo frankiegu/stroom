@@ -16,6 +16,7 @@
 
 package stroom.security.server;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Strings;
 import org.jose4j.jwt.JwtClaims;
 import org.jose4j.jwt.MalformedClaimException;
@@ -40,18 +41,23 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.servlet.http.HttpSession;
 import javax.ws.rs.HttpMethod;
+import javax.ws.rs.client.Client;
+import javax.ws.rs.client.Entity;
+import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.UriBuilder;
 import java.io.IOException;
 import java.net.URI;
-import java.time.Duration;
-import java.time.Instant;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.Enumeration;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -63,6 +69,9 @@ import java.util.regex.Pattern;
  * </p>
  */
 public class SecurityFilter implements Filter {
+    // TODO : @66 TEMPORARY HACK TO USE JERSEY CLIENT
+    public static Client client;
+
     private static final Logger LOGGER = LoggerFactory.getLogger(SecurityFilter.class);
     private static final LambdaLogger LAMBDA_LOGGER = LambdaLoggerFactory.getLogger(SecurityFilter.class);
 
@@ -75,38 +84,51 @@ public class SecurityFilter implements Filter {
     private static final String SCOPE = "scope";
     private static final String RESPONSE_TYPE = "response_type";
     private static final String CLIENT_ID = "client_id";
+    private static final String CLIENT_SECRET = "client_secret";
     private static final String REDIRECT_URL = "redirect_url";
     private static final String STATE = "state";
     private static final String NONCE = "nonce";
     private static final String PROMPT = "prompt";
     private static final String ACCESS_CODE = "accessCode";
 
+    // GOOGLE OAuth params
+    private static final String REDIRECT_URI = "redirect_uri"; // Google use `redirect_uri` instead of our `redirect_url`
+    private static final String GRANT_TYPE = "grant_type";
+    private static final String CODE = "code"; // Google use `code` instead of `accessCode`
+
     private static final Set<String> RESERVED_PARAMS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
             SCOPE,
             RESPONSE_TYPE,
             CLIENT_ID,
+            CLIENT_SECRET,
             REDIRECT_URL,
             STATE,
             NONCE,
             PROMPT,
-            ACCESS_CODE)));
+            ACCESS_CODE,
+            REDIRECT_URI,
+            GRANT_TYPE,
+            CODE)));
 
     private final SecurityConfig config;
+    private final GoogleOAuth2Config googleOAuth2Config;
     private final JWTService jwtService;
     private final AuthenticationServiceClients authenticationServiceClients;
     private final AuthenticationService authenticationService;
 
-//    private Pattern pattern = null;
+    //    private Pattern pattern = null;
     private List<Pattern> bypassPatterns = new ArrayList<>();
     private Pattern apiPathPattern;
     private Pattern dispatchPathPattern;
 
     public SecurityFilter(
             final SecurityConfig config,
+            final GoogleOAuth2Config googleOAuth2Config,
             final JWTService jwtService,
             final AuthenticationServiceClients authenticationServiceClients,
             final AuthenticationService authenticationService) {
         this.config = config;
+        this.googleOAuth2Config = googleOAuth2Config;
         this.jwtService = jwtService;
         this.authenticationServiceClients = authenticationServiceClients;
         this.authenticationService = authenticationService;
@@ -293,6 +315,15 @@ public class SecurityFilter implements Filter {
         }
     }
 
+    private boolean isGoogleOAuth2Enabled() {
+        return googleOAuth2Config != null &&
+                googleOAuth2Config.getAuthUrl() != null && !googleOAuth2Config.getAuthUrl().isEmpty() &&
+                googleOAuth2Config.getTokenUrl() != null && !googleOAuth2Config.getTokenUrl().isEmpty() &&
+                googleOAuth2Config.getClientId() != null && !googleOAuth2Config.getClientId().isEmpty() &&
+                googleOAuth2Config.getClientSecret() != null && !googleOAuth2Config.getClientSecret().isEmpty() &&
+                googleOAuth2Config.getRedirectUri() != null && !googleOAuth2Config.getRedirectUri().isEmpty();
+    }
+
     private boolean loginUI(final HttpServletRequest request, final HttpServletResponse response) throws IOException {
         boolean loggedIn = false;
 
@@ -306,7 +337,7 @@ public class SecurityFilter implements Filter {
             if (state == null) {
                 LOGGER.warn("Unexpected state: " + stateId);
 
-            } else {
+            } else if (!isGoogleOAuth2Enabled()) {
 
                 // If we have an access code we can try and log in.
                 final String accessCode = getLastParam(request, ACCESS_CODE);
@@ -338,9 +369,114 @@ public class SecurityFilter implements Filter {
                         response.sendRedirect(state.getUrl());
                     }
                 }
+
+            } else {
+                // Use Google OAuth2 API
+                final String code = getLastParam(request, "code");
+                if (code != null) {
+                    // Invalidate the current session.
+                    HttpSession session = request.getSession(false);
+                    if (session != null) {
+                        session.invalidate();
+                    }
+
+                    LOGGER.debug("We have the following access code: {{}}", code);
+                    session = request.getSession(true);
+
+                    UserAgentSessionUtil.set(request);
+
+                    try {
+                        // Verify code.
+                        final Map<String, String> params = new HashMap<>();
+                        params.put(GRANT_TYPE, "authorization_code");
+                        params.put(CLIENT_ID, googleOAuth2Config.getClientId());
+                        params.put(CLIENT_SECRET, googleOAuth2Config.getClientSecret());
+                        params.put(REDIRECT_URI, googleOAuth2Config.getRedirectUri());
+                        params.put(CODE, code);
+
+                        final String tokenUrl = googleOAuth2Config.getTokenUrl();
+                        final Response res = client.target(tokenUrl).request().post(Entity.entity(params, MediaType.APPLICATION_JSON));
+
+                        Map responseMap;
+                        if (HttpServletResponse.SC_OK == res.getStatus()) {
+                            responseMap = res.readEntity(Map.class);
+                        } else {
+                            throw new AuthenticationException("Received status " + res.getStatus() + " from " + tokenUrl);
+                        }
+
+                        AuthenticationToken token = null;
+
+                        String sessionId = session.getId();
+                        final String idToken = (String) responseMap.get("id_token");
+                        if (idToken == null) {
+                            throw new AuthenticationException("'id_token' not provided in response");
+                        }
+
+                        final String[] parts = idToken.split("\\.");
+                        final Map<String, String> tokenData = decode(parts[1]);
+
+//                                try {
+//                                    for (final String part : parts) {
+//                                        final byte[] decoded = Base64.getDecoder().decode(part);
+//                                        final String json = new String(decoded, StandardCharsets.UTF_8);
+//                                        System.out.println(json);
+//                                    }
+//                                } catch (final Exception e) {
+//                                    e.printStackTrace();
+//                                }
+
+                        final String nonce = tokenData.get("nonce");
+                        if (nonce == null) {
+                            throw new AuthenticationException("'nonce' not provided in token");
+                        }
+
+                        final boolean match = nonce.equals(state.getNonce());
+                        if (match) {
+                            LOGGER.info("User is authenticated for sessionId " + sessionId);
+
+                            final String email = tokenData.get("email");
+                            if (email == null) {
+                                throw new AuthenticationException("Email not provided in token");
+                            }
+                            token = new AuthenticationToken(email, idToken);
+
+                        } else {
+                            // If the nonces don't match we need to redirect to log in again.
+                            // Maybe the request uses an out-of-date stroomSessionId?
+                            LOGGER.info("Received a bad nonce!");
+                        }
+
+                        final UserRef userRef = authenticationService.getUserRef(token);
+
+                        if (userRef != null) {
+                            // Set the user ref in the session.
+                            UserRefSessionUtil.set(session, userRef);
+
+                            loggedIn = true;
+                        }
+
+                        // If we manage to login then redirect to the original URL held in the state.
+                        if (loggedIn) {
+                            LOGGER.info("Redirecting to initiating URL: {}", state.getUrl());
+                            response.sendRedirect(state.getUrl());
+                        }
+
+                    } catch (final Exception e) {
+                        LOGGER.error(e.getMessage(), e);
+                    }
+
+                }
             }
         }
         return loggedIn;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, String> decode(final String part) throws IOException {
+        final byte[] decoded = Base64.getDecoder().decode(part);
+        final String json = new String(decoded, StandardCharsets.UTF_8);
+        ObjectMapper mapper = new ObjectMapper();
+        return mapper.readValue(json, Map.class);
     }
 
     /**
@@ -400,14 +536,26 @@ public class SecurityFilter implements Filter {
         final AuthenticationState state = AuthenticationStateSessionUtil.create(request, redirectUrl);
 
         // In some cases we might need to use an external URL as the current incoming one might have been proxied.
-        final UriBuilder authenticationRequest = UriBuilder.fromUri(config.getAuthenticationServiceUrl())
-                .path("/authenticate")
-                .queryParam(SCOPE, "openid")
-                .queryParam(RESPONSE_TYPE, "code")
-                .queryParam(CLIENT_ID, "stroom")
-                .queryParam(REDIRECT_URL, redirectUrl)
-                .queryParam(STATE, state.getId())
-                .queryParam(NONCE, state.getNonce());
+        UriBuilder authenticationRequest;
+        if (!isGoogleOAuth2Enabled()) {
+            authenticationRequest = UriBuilder.fromUri(config.getAuthenticationServiceUrl())
+                    .path("/authenticate")
+                    .queryParam(SCOPE, "openid")
+                    .queryParam(RESPONSE_TYPE, "code")
+                    .queryParam(CLIENT_ID, "stroom")
+                    .queryParam(REDIRECT_URL, redirectUrl)
+                    .queryParam(STATE, state.getId())
+                    .queryParam(NONCE, state.getNonce());
+        } else {
+            // Use Google OAuth2 API which uses some subtly different parameters.
+            authenticationRequest = UriBuilder.fromUri(googleOAuth2Config.getAuthUrl())
+                    .queryParam(RESPONSE_TYPE, CODE)
+                    .queryParam(CLIENT_ID, googleOAuth2Config.getClientId())
+                    .queryParam(REDIRECT_URI, googleOAuth2Config.getRedirectUri())
+                    .queryParam(SCOPE, "openid email")
+                    .queryParam(STATE, state.getId())
+                    .queryParam(NONCE, state.getNonce());
+        }
 
         // If there's 'prompt' in the request then we'll want to pass that on to the AuthenticationService.
         // In OpenId 'prompt=login' asks the IP to present a login page to the user, and that's the effect

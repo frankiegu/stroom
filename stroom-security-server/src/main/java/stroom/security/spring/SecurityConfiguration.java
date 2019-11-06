@@ -23,6 +23,7 @@ import org.springframework.context.annotation.FilterType;
 import stroom.node.server.StroomPropertyService;
 import stroom.security.server.AuthenticationService;
 import stroom.security.server.AuthenticationServiceClients;
+import stroom.security.server.GoogleOAuth2Config;
 import stroom.security.server.JWTService;
 import stroom.security.server.SecurityConfig;
 import stroom.security.server.SecurityFilter;
@@ -55,14 +56,27 @@ public class SecurityConfiguration {
         return securityConfig;
     }
 
+    @Bean(name = "googleOAuth2Config")
+    public GoogleOAuth2Config googleOAuth2Config(final StroomPropertyService stroomPropertyService) {
+        final GoogleOAuth2Config config = new GoogleOAuth2Config();
+        config.setAuthUrl(stroomPropertyService.getProperty("stroom.authentication.authUrl"));
+        config.setTokenUrl(stroomPropertyService.getProperty("stroom.authentication.tokenUrl"));
+        config.setClientId(stroomPropertyService.getProperty("stroom.authentication.clientId"));
+        config.setClientSecret(stroomPropertyService.getProperty("stroom.authentication.clientSecret"));
+        config.setRedirectUri(stroomPropertyService.getProperty("stroom.authentication.redirectUri"));
+        return config;
+    }
+
     @Bean(name = "securityFilter")
     public SecurityFilter securityFilter(
             final SecurityConfig securityConfig,
+            final GoogleOAuth2Config googleOAuth2Config,
             final JWTService jwtService,
             final AuthenticationServiceClients authenticationServiceClients,
             final AuthenticationService authenticationService) {
         return new SecurityFilter(
                 securityConfig,
+                googleOAuth2Config,
                 jwtService,
                 authenticationServiceClients,
                 authenticationService);

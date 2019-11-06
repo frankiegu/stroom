@@ -171,6 +171,11 @@ public class App extends Application<Config> {
 
     @Override
     public void run(final Config configuration, final Environment environment) {
+        // TODO : @66 TEMPORARY HACK TO USE JERSEY CLIENT
+        final Client client = new JerseyClientBuilder(environment).using(configuration.getJerseyClientConfiguration())
+                .build(getName());
+        SecurityFilter.client = client;
+
         // Add useful logging setup.
         registerLogConfiguration(environment);
         environment.healthChecks().register(LogLevelInspector.class.getName(), new LogLevelInspector());
@@ -286,7 +291,7 @@ public class App extends Application<Config> {
 
         // If the userAgent has not been explicitly set in the config then set it based
         // on the build version
-        if (! jerseyClientConfiguration.getUserAgent().isPresent()) {
+        if (!jerseyClientConfiguration.getUserAgent().isPresent()) {
             final String userAgent = ForwardStreamHandlerFactory.getUserAgentString(null);
             LOGGER.info("Setting jersey client user agent string to [{}]", userAgent);
             jerseyClientConfiguration.setUserAgent(Optional.of(userAgent));

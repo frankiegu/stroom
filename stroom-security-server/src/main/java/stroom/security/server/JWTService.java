@@ -27,10 +27,13 @@ import javax.inject.Inject;
 import javax.servlet.ServletRequest;
 import javax.servlet.http.HttpServletRequest;
 import javax.validation.constraints.NotNull;
+import javax.ws.rs.core.Response;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 @Component
@@ -49,6 +52,7 @@ public class JWTService implements HasHealthCheck {
     private final boolean checkTokenRevocation;
     private final boolean authenticationRequired;
     private Clock clock;
+    private final GoogleOAuth2Config googleOAuth2Config;
 
     @Inject
     public JWTService(
@@ -58,6 +62,7 @@ public class JWTService implements HasHealthCheck {
             @NotNull @Value("#{propertyConfigurer.getProperty('stroom.security.apiToken')}") final String apiKey,
             @NotNull @Value("#{propertyConfigurer.getProperty('stroom.auth.jwt.enabletokenrevocationcheck')}") final boolean enableTokenRevocationCheck,
             @NotNull @Value("#{propertyConfigurer.getProperty('stroom.authentication.required')}") final boolean authenticationRequired,
+            final GoogleOAuth2Config googleOAuth2Config,
             final AuthenticationServiceClients authenticationServiceClients) {
         if (durationToWarnBeforeExpiry != null) {
             this.durationToWarnBeforeExpiry = Duration.ofMillis(ModelStringUtil.parseDurationString(durationToWarnBeforeExpiry));
@@ -68,6 +73,7 @@ public class JWTService implements HasHealthCheck {
         this.authenticationServiceClients = authenticationServiceClients;
         this.checkTokenRevocation = enableTokenRevocationCheck;
         this.authenticationRequired = authenticationRequired;
+        this.googleOAuth2Config = googleOAuth2Config;
 
         updatePublicJsonWebKey();
 
@@ -85,9 +91,16 @@ public class JWTService implements HasHealthCheck {
     private void updatePublicJsonWebKey() {
         if (authenticationRequired) {
             try {
-                String jwkAsJson = fetchNewPublicKey();
-                jwk = RsaJsonWebKey.Factory.newPublicJwk(jwkAsJson);
-            } catch (JoseException | ApiException e) {
+                final Response res = SecurityFilter.client.target(authenticationServiceUrl).request().get();
+//                res.bufferEntity();
+                Map jwkAsJson = res.readEntity(Map.class);
+                List<Map> keys = (List<Map>) jwkAsJson.get("keys");
+                Map<String,Object> params = (Map<String,Object>) keys.get(0);
+                jwk = RsaJsonWebKey.Factory.newPublicJwk(params);
+
+//                String jwkAsJson = fetchNewPublicKey();
+//                jwk = RsaJsonWebKey.Factory.newPublicJwk(jwkAsJson);
+            } catch (JoseException  e) {
                 LOGGER.error("Unable to fetch the remote authentication service's public key!", e);
             }
         }
@@ -243,9 +256,10 @@ public class JWTService implements HasHealthCheck {
                 .setRequireSubject() // the JWT must have a subject claim
                 .setVerificationKey(this.jwk.getPublicKey()) // verify the signature with the public key
                 .setRelaxVerificationKeyValidation() // relaxes key length requirement
-                .setJwsAlgorithmConstraints( // only allow the expected signature algorithm(s) in the given context
-                        new AlgorithmConstraints(AlgorithmConstraints.ConstraintType.WHITELIST, // which is only RS256 here
-                                AlgorithmIdentifiers.RSA_USING_SHA256))
+//                .setJwsAlgorithmConstraints( // only allow the expected signature algorithm(s) in the given context
+//                        new AlgorithmConstraints(AlgorithmConstraints.ConstraintType.WHITELIST, // which is only RS256 here
+//                                AlgorithmIdentifiers.RSA_USING_SHA256))
+                .setExpectedAudience(googleOAuth2Config.getClientId())
                 .setExpectedIssuer(authJwtIssuer);
         return builder.build();
     }

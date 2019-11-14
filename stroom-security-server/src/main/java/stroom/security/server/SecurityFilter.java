@@ -327,65 +327,66 @@ public class SecurityFilter implements Filter {
     private boolean loginUI(final HttpServletRequest request, final HttpServletResponse response) throws IOException {
         boolean loggedIn = false;
 
-        // If we have a state id then this should be a return from the auth service.
-        final String stateId = getLastParam(request, STATE);
-        if (stateId != null) {
-            LOGGER.debug("We have the following state: {{}}", stateId);
+        try {
+            // If we have a state id then this should be a return from the auth service.
+            final String stateId = getLastParam(request, STATE);
+            if (stateId != null) {
+                LOGGER.debug("We have the following state: {{}}", stateId);
 
-            // Check the state is one we requested.
-            final AuthenticationState state = AuthenticationStateSessionUtil.pop(request, stateId);
-            if (state == null) {
-                LOGGER.warn("Unexpected state: " + stateId);
+                // Check the state is one we requested.
+                final AuthenticationState state = AuthenticationStateSessionUtil.pop(request, stateId);
+                if (state == null) {
+                    LOGGER.warn("Unexpected state: " + stateId);
 
-            } else if (!isGoogleOAuth2Enabled()) {
+                } else if (!isGoogleOAuth2Enabled()) {
 
-                // If we have an access code we can try and log in.
-                final String accessCode = getLastParam(request, ACCESS_CODE);
-                if (accessCode != null) {
-                    // Invalidate the current session.
-                    HttpSession session = request.getSession(false);
-                    if (session != null) {
-                        session.invalidate();
+                    // If we have an access code we can try and log in.
+                    final String accessCode = getLastParam(request, ACCESS_CODE);
+                    if (accessCode != null) {
+                        // Invalidate the current session.
+                        HttpSession session = request.getSession(false);
+                        if (session != null) {
+                            session.invalidate();
+                        }
+
+                        LOGGER.debug("We have the following access code: {{}}", accessCode);
+                        session = request.getSession(true);
+
+                        UserAgentSessionUtil.set(request);
+
+                        final String idToken = authenticationServiceClients.newAuthenticationApi().getIdToken(accessCode);
+                        final AuthenticationToken token = createUIToken(session, state, idToken);
+                        final UserRef userRef = authenticationService.getUserRef(token);
+
+                        if (userRef != null) {
+                            // Set the user ref in the session.
+                            UserRefSessionUtil.set(session, userRef);
+
+                            loggedIn = true;
+                        }
+
+                        // If we manage to login then redirect to the original URL held in the state.
+                        if (loggedIn) {
+                            LOGGER.info("Redirecting to initiating URL: {}", state.getUrl());
+                            response.sendRedirect(state.getUrl());
+                        }
                     }
 
-                    LOGGER.debug("We have the following access code: {{}}", accessCode);
-                    session = request.getSession(true);
+                } else {
+                    // Use Google OAuth2 API
+                    final String code = getLastParam(request, "code");
+                    if (code != null) {
+                        // Invalidate the current session.
+                        HttpSession session = request.getSession(false);
+                        if (session != null) {
+                            session.invalidate();
+                        }
 
-                    UserAgentSessionUtil.set(request);
+                        LOGGER.debug("We have the following access code: {{}}", code);
+                        session = request.getSession(true);
 
-                    final AuthenticationToken token = createUIToken(session, state, accessCode);
-                    final UserRef userRef = authenticationService.getUserRef(token);
+                        UserAgentSessionUtil.set(request);
 
-                    if (userRef != null) {
-                        // Set the user ref in the session.
-                        UserRefSessionUtil.set(session, userRef);
-
-                        loggedIn = true;
-                    }
-
-                    // If we manage to login then redirect to the original URL held in the state.
-                    if (loggedIn) {
-                        LOGGER.info("Redirecting to initiating URL: {}", state.getUrl());
-                        response.sendRedirect(state.getUrl());
-                    }
-                }
-
-            } else {
-                // Use Google OAuth2 API
-                final String code = getLastParam(request, "code");
-                if (code != null) {
-                    // Invalidate the current session.
-                    HttpSession session = request.getSession(false);
-                    if (session != null) {
-                        session.invalidate();
-                    }
-
-                    LOGGER.debug("We have the following access code: {{}}", code);
-                    session = request.getSession(true);
-
-                    UserAgentSessionUtil.set(request);
-
-                    try {
                         // Verify code.
                         final Map<String, String> params = new HashMap<>();
                         params.put(GRANT_TYPE, "authorization_code");
@@ -404,48 +405,15 @@ public class SecurityFilter implements Filter {
                             throw new AuthenticationException("Received status " + res.getStatus() + " from " + tokenUrl);
                         }
 
-                        AuthenticationToken token = null;
-
-                        String sessionId = session.getId();
                         final String idToken = (String) responseMap.get("id_token");
                         if (idToken == null) {
                             throw new AuthenticationException("'id_token' not provided in response");
                         }
 
-                        final String[] parts = idToken.split("\\.");
-                        final Map<String, String> tokenData = decode(parts[1]);
+//                        final String[] parts = idToken.split("\\.");
+//                        final Map<String, String> tokenData = decode(parts[1]);
 
-//                                try {
-//                                    for (final String part : parts) {
-//                                        final byte[] decoded = Base64.getDecoder().decode(part);
-//                                        final String json = new String(decoded, StandardCharsets.UTF_8);
-//                                        System.out.println(json);
-//                                    }
-//                                } catch (final Exception e) {
-//                                    e.printStackTrace();
-//                                }
-
-                        final String nonce = tokenData.get("nonce");
-                        if (nonce == null) {
-                            throw new AuthenticationException("'nonce' not provided in token");
-                        }
-
-                        final boolean match = nonce.equals(state.getNonce());
-                        if (match) {
-                            LOGGER.info("User is authenticated for sessionId " + sessionId);
-
-                            final String email = tokenData.get("email");
-                            if (email == null) {
-                                throw new AuthenticationException("Email not provided in token");
-                            }
-                            token = new AuthenticationToken(email, idToken);
-
-                        } else {
-                            // If the nonces don't match we need to redirect to log in again.
-                            // Maybe the request uses an out-of-date stroomSessionId?
-                            LOGGER.info("Received a bad nonce!");
-                        }
-
+                        final AuthenticationToken token = createUIToken(session, state, idToken);
                         final UserRef userRef = authenticationService.getUserRef(token);
 
                         if (userRef != null) {
@@ -461,13 +429,22 @@ public class SecurityFilter implements Filter {
                             response.sendRedirect(state.getUrl());
                         }
 
-                    } catch (final Exception e) {
-                        LOGGER.error(e.getMessage(), e);
-                    }
 
+                    }
                 }
             }
+        } catch (final ApiException e) {
+            if (e.getCode() == Response.Status.UNAUTHORIZED.getStatusCode()) {
+                // If we can't exchange the accessCode for an idToken then this probably means the
+                // accessCode doesn't exist any more, or has already been used. so we can't proceed.
+                LOGGER.error("The accessCode used to obtain an idToken was rejected. Has it already been used?");
+            } else {
+                LOGGER.error("Unable to retrieve idToken!", e);
+            }
+        } catch (final Exception e) {
+            LOGGER.error(e.getMessage(), e);
         }
+
         return loggedIn;
     }
 
@@ -583,31 +560,27 @@ public class SecurityFilter implements Filter {
      * This method must create the token.
      * It does this by enacting the OpenId exchange of accessCode for idToken.
      */
-    private AuthenticationToken createUIToken(final HttpSession session, final AuthenticationState state, final String accessCode) {
+    private AuthenticationToken createUIToken(final HttpSession session, final AuthenticationState state, final String idToken) {
         AuthenticationToken token = null;
 
         try {
             String sessionId = session.getId();
-            final String idToken = authenticationServiceClients.newAuthenticationApi().getIdToken(accessCode);
             final JwtClaims jwtClaimsOptional = jwtService.verifyToken(idToken);
             final String nonce = (String) jwtClaimsOptional.getClaimsMap().get("nonce");
             final boolean match = nonce.equals(state.getNonce());
             if (match) {
                 LOGGER.info("User is authenticated for sessionId " + sessionId);
-                token = new AuthenticationToken(jwtClaimsOptional.getSubject(), idToken);
+                final String email = (String) jwtClaimsOptional.getClaimsMap().get("email");
+                if (email != null) {
+                    token = new AuthenticationToken(email, idToken);
+                } else {
+                    token = new AuthenticationToken(jwtClaimsOptional.getSubject(), idToken);
+                }
 
             } else {
                 // If the nonces don't match we need to redirect to log in again.
                 // Maybe the request uses an out-of-date stroomSessionId?
                 LOGGER.info("Received a bad nonce!");
-            }
-        } catch (ApiException e) {
-            if (e.getCode() == Response.Status.UNAUTHORIZED.getStatusCode()) {
-                // If we can't exchange the accessCode for an idToken then this probably means the
-                // accessCode doesn't exist any more, or has already been used. so we can't proceed.
-                LOGGER.error("The accessCode used to obtain an idToken was rejected. Has it already been used?");
-            } else {
-                LOGGER.error("Unable to retrieve idToken!", e);
             }
         } catch (final MalformedClaimException | InvalidJwtException e) {
             LOGGER.warn(e.getMessage());
